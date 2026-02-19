@@ -2633,6 +2633,22 @@ ${slidesHtml}
         border-radius: 0;
         font-size: inherit;
       }
+      /* Indented code block with ASCII tree connectors */
+      .indented-code-block {
+        overflow-x: auto;
+        padding: 1em;
+        border-radius: 6px;
+        background-color: var(--pre-bg);
+        border: 1px solid var(--border);
+        font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+        font-size: 0.9em;
+        line-height: 1.6;
+        margin: 1em 0;
+      }
+      .icb-line {
+        white-space: pre;
+        min-height: 1.6em;
+      }
       blockquote {
         border-left: 4px solid var(--blockquote-border);
         background-color: var(--blockquote-bg);

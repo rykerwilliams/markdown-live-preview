@@ -91,6 +91,151 @@ export function generateSlug(text: string): string {
     .trim();
 }
 
+/**
+ * Core rule: merge a preceding single-line paragraph into the following code_block token.
+ * This handles cases where a non-indented heading line (e.g. "Feature: X") is separated
+ * from indented content by a blank line — markdown-it splits them into <p> + <pre><code>,
+ * but semantically they belong together.
+ */
+function mergeParaIntoCodeBlock(state: { tokens: any[] }) {
+  const tokens = state.tokens;
+  for (let i = tokens.length - 1; i >= 3; i--) {
+    if (tokens[i].type !== 'code_block') continue;
+
+    const paraClose = tokens[i - 1];
+    const inlineToken = tokens[i - 2];
+    const paraOpen = tokens[i - 3];
+
+    if (paraClose.type !== 'paragraph_close') continue;
+    if (inlineToken.type !== 'inline') continue;
+    if (paraOpen.type !== 'paragraph_open') continue;
+
+    // Only merge single-line paragraphs
+    if (inlineToken.content.includes('\n')) continue;
+
+    // Prepend paragraph text to code_block content and mark the merge
+    tokens[i].content = inlineToken.content + '\n' + tokens[i].content;
+    tokens[i].meta = tokens[i].meta || {};
+    tokens[i].meta.mergedParagraph = true;
+
+    // Extend source map to include the paragraph
+    if (paraOpen.map && tokens[i].map) {
+      tokens[i].map[0] = paraOpen.map[0];
+    }
+
+    // Remove the 3 paragraph tokens
+    tokens.splice(i - 3, 3);
+    i -= 3;
+  }
+}
+
+/**
+ * Override md.renderer.rules.code_block to produce structured HTML with ASCII tree connectors.
+ * Uses Unicode box-drawing characters (├──, └──, │) for a proper tree visualization.
+ */
+function installIndentedCodeBlockRenderer(md: MarkdownItType, indentSpaces: number) {
+  // Build the horizontal connector segment: ── (width = indentSpaces - 1 dashes + 1 space)
+  const hBar = '\u2500'.repeat(Math.max(indentSpaces - 1, 1)) + ' ';
+  const tee = '\u251C' + hBar;     // ├──
+  const corner = '\u2514' + hBar;  // └──
+  const pipe = '\u2502' + ' '.repeat(indentSpaces); // │ + padding to match width
+  const space = ' '.repeat(indentSpaces + 1);       // blank spacer matching width
+
+  md.renderer.rules.code_block = (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tokens: any[],
+    idx: number,
+  ) => {
+    const token = tokens[idx];
+    const content = token.content;
+    const dataLine = token.attrGet ? token.attrGet('data-line') : null;
+    const dlAttr = dataLine !== null ? ` data-line="${dataLine}"` : '';
+
+    const rawLines = content.replace(/\n$/, '').split('\n');
+    const hasMergedParagraph = token.meta?.mergedParagraph === true;
+
+    // Track which lines are originally blank
+    const isBlank: boolean[] = rawLines.map((line: string) => line.trim() === '');
+
+    // Compute indent level for each line.
+    // The code_block tokenizer strips indentSpaces leading spaces from every line,
+    // so we add 1 to restore the original indent level. The merged paragraph line
+    // (always first) was originally a plain paragraph at level 0 — keep it there.
+    const levels: number[] = rawLines.map((line: string, idx: number) => {
+      if (line.trim() === '') return -1;
+      const spaces = line.match(/^ */)![0].length;
+      const rawLevel = Math.floor(spaces / indentSpaces);
+      if (hasMergedParagraph && idx === 0) return 0; // merged paragraph stays at root
+      return rawLevel + 1; // compensate for stripped indent
+    });
+
+    // Resolve blank line levels: use the next non-blank line's level for guide continuity
+    for (let i = levels.length - 1; i >= 0; i--) {
+      if (levels[i] === -1) {
+        levels[i] = i + 1 < levels.length ? levels[i + 1] : 0;
+      }
+    }
+
+    // Check if the vertical line at column g continues below line i.
+    // The line continues only if there's another sibling at level g+1
+    // before the parent scope (level <= g) ends.
+    const lineContinues = (i: number, g: number): boolean => {
+      for (let j = i + 1; j < levels.length; j++) {
+        if (levels[j] <= g) return false;     // parent scope ended
+        if (levels[j] === g + 1) return true;  // found sibling at this branch
+        // levels[j] > g+1: children of current sibling, keep scanning
+      }
+      return false;
+    };
+
+    // Determine guide type for column g on line i
+    const getGuideType = (i: number, g: number): 'tee' | 'corner' | 'pipe' | 'space' => {
+      if (g === levels[i] - 1) {
+        // Connector column
+        return lineContinues(i, g) ? 'tee' : 'corner';
+      }
+      // Pass-through column
+      return lineContinues(i, g) ? 'pipe' : 'space';
+    };
+
+    const linesHtml = rawLines.map((line: string, i: number) => {
+      const level = levels[i];
+
+      if (level === 0) {
+        // Top-level line: no guides, render text directly
+        const text = isBlank[i] ? '' : escapeHtmlForFence(line.trim());
+        return `<div class="icb-line">${text}</div>`;
+      }
+
+      let prefix = '';
+      if (isBlank[i]) {
+        // Blank lines only show pass-through pipes (no tee/corner connectors)
+        for (let g = 0; g < level; g++) {
+          prefix += lineContinues(i, g) ? pipe : space;
+        }
+        return `<div class="icb-line icb-blank">${escapeHtmlForFence(prefix)}</div>`;
+      }
+
+      for (let g = 0; g < level; g++) {
+        const type = getGuideType(i, g);
+        switch (type) {
+          case 'tee': prefix += tee; break;
+          case 'corner': prefix += corner; break;
+          case 'pipe': prefix += pipe; break;
+          case 'space': prefix += space; break;
+        }
+      }
+
+      // Strip leading spaces matching the original (pre-adjustment) indent in the content
+      const contentSpaces = (hasMergedParagraph && i === 0) ? 0 : (level - 1) * indentSpaces;
+      const stripped = line.slice(contentSpaces);
+      return `<div class="icb-line">${escapeHtmlForFence(prefix + stripped)}</div>`;
+    }).join('\n');
+
+    return `<div class="indented-code-block"${dlAttr}>\n${linesHtml}\n</div>\n`;
+  };
+}
+
 export function createMarkdownParser(
   configOverrides?: Partial<MarkdownLivePreviewConfig>,
 ): MarkdownItType {
@@ -146,6 +291,12 @@ export function createMarkdownParser(
 
   // Custom fence renderer for diagram languages (mermaid, etc.)
   installDiagramFenceRenderer(md, config.codeChunk.enableScriptExecution);
+
+  // Merge preceding single-line paragraph into indented code block
+  if (config.markdown.enableIndentedCodeBlock) {
+    md.core.ruler.push('merge_para_into_code_block', mergeParaIntoCodeBlock);
+    installIndentedCodeBlockRenderer(md, config.markdown.indentedCodeBlockSpaces);
+  }
 
   // Add data-line attributes for scroll sync
   md.core.ruler.push(

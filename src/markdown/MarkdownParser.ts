@@ -16,6 +16,7 @@ type MarkdownItType = ReturnType<typeof MarkdownIt>;
 
 import { extname } from 'node:path';
 
+import { isAsciiBoxDiagram } from './AsciiDiagramParser';
 import { getFullConfig } from '../config/ConfigManager';
 import type { MarkdownLivePreviewConfig } from '../types';
 
@@ -873,6 +874,26 @@ function installDiagramFenceRenderer(
           `</div>\n`
         );
       }
+    }
+
+    // Auto-detect ASCII box-drawing diagrams in unlabelled code blocks
+    if (!language && isAsciiBoxDiagram(content)) {
+      const asciiControls =
+        `<div class="diagram-controls">` +
+        `<button class="diagram-toggle-btn" title="Toggle controls">⋯</button>` +
+        `<div class="diagram-controls-expanded">` +
+        `<button class="diagram-copy-source-btn" title="Copy source code">Code</button>` +
+        `<button class="diagram-copy-svg-btn" title="Copy as SVG">SVG</button>` +
+        `<button class="diagram-copy-png-btn" title="Copy as PNG">PNG</button>` +
+        `<button class="diagram-ascii-diagram-btn" title="Toggle ASCII mode">ASCII</button>` +
+        `</div>` +
+        `</div>`;
+      return (
+        `<div class="diagram-container ascii-diagram-container"${dlAttr}>` +
+        asciiControls +
+        `<div class="ascii-diagram"><script type="text/ascii-diagram">${content}</script></div>` +
+        `</div>\n`
+      );
     }
 
     // For non-diagram languages, render as code block with line numbers and copy button

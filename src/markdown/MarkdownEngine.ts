@@ -734,18 +734,30 @@ export class MarkdownEngine {
           return;
         }
 
-        // ASCII toggle (Mermaid only)
-        if (target.matches('.diagram-ascii-btn')) {
-          window._mermaidAsciiMode = !window._mermaidAsciiMode;
-          // Update all ASCII buttons to reflect state
+        // ASCII toggle — unified: affects mermaid + ASCII box-drawing diagrams
+        if (target.matches('.diagram-ascii-btn') || target.matches('.diagram-ascii-diagram-btn')) {
+          var newAsciiState = !window._mermaidAsciiMode;
+          window._mermaidAsciiMode = newAsciiState;
+          window._asciiDiagramMode = newAsciiState;
+          // Sync all ASCII buttons
           document.querySelectorAll('.diagram-ascii-btn').forEach(function(btn) {
-            btn.classList.toggle('active', window._mermaidAsciiMode);
+            btn.classList.toggle('active', newAsciiState);
           });
+          document.querySelectorAll('.diagram-ascii-diagram-btn').forEach(function(btn) {
+            btn.classList.toggle('active', newAsciiState);
+          });
+          // Re-render mermaid
           if (window.rerenderDiagramsForTheme) {
             window.rerenderDiagramsForTheme();
           }
+          // Re-render ASCII box-drawing diagrams
+          document.querySelectorAll('.ascii-diagram[data-rendered]').forEach(function(el) {
+            el.removeAttribute('data-rendered');
+          });
+          if (window.renderAsciiDiagram) window.renderAsciiDiagram();
+          // Persist
           if (vscode) {
-            vscode.postMessage({ command: 'setMermaidAsciiMode', args: [window._mermaidAsciiMode] });
+            vscode.postMessage({ command: 'setMermaidAsciiMode', args: [newAsciiState] });
           }
           return;
         }
@@ -825,6 +837,9 @@ export class MarkdownEngine {
           sel.value = currentTheme;
         });
         document.querySelectorAll('.diagram-ascii-btn').forEach(function(btn) {
+          btn.classList.toggle('active', window._mermaidAsciiMode);
+        });
+        document.querySelectorAll('.diagram-ascii-diagram-btn').forEach(function(btn) {
           btn.classList.toggle('active', window._mermaidAsciiMode);
         });
       }
@@ -3150,10 +3165,50 @@ ${slidesHtml}
       .diagram-ascii-btn:active {
         background: var(--bg-tertiary);
       }
-      .diagram-ascii-btn.active {
+      .diagram-ascii-btn.active,
+      .diagram-ascii-diagram-btn.active {
         background: var(--link);
         color: #fff;
         border-color: var(--link);
+      }
+      .diagram-ascii-diagram-btn {
+        padding: 2px 8px;
+        font-size: 11px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--bg);
+        color: var(--fg);
+        cursor: pointer;
+        font-family: inherit;
+        transition: background 0.1s;
+      }
+      .diagram-ascii-diagram-btn:hover {
+        background: var(--bg-secondary);
+      }
+      .diagram-ascii-diagram-btn:active {
+        background: var(--bg-tertiary);
+      }
+      .ascii-diagram-container .ascii-diagram {
+        overflow-x: auto;
+        padding: 16px;
+      }
+      .ascii-diagram-container .ascii-diagram svg {
+        max-width: 100%;
+        height: auto;
+        display: block;
+        margin: 0 auto;
+      }
+      .ascii-diagram-source {
+        font-family: monospace;
+        font-size: 13px;
+        line-height: 1.4;
+        white-space: pre;
+        overflow-x: auto;
+        padding: 16px;
+        margin: 0;
+        background: var(--bg-secondary);
+        border-radius: 4px;
+        color: var(--fg);
       }
       .diagram-theme-select {
         padding: 2px 4px;
@@ -3334,6 +3389,9 @@ window._mermaidThemeKey = '${mermaidTheme}';
 // Current mermaid ASCII mode (mutable for runtime toggling)
 window._mermaidAsciiMode = ${this.config.mermaid.asciiMode};
 
+// Current ASCII box-drawing diagram mode (synced with mermaid ASCII mode)
+window._asciiDiagramMode = ${this.config.mermaid.asciiMode};
+
 // Pick beautiful-mermaid theme based on current dark/light
 window._getBmTheme = function() {
   if (typeof beautifulMermaid === 'undefined') return null;
@@ -3428,6 +3486,545 @@ window.renderMermaid = async function() {
   }
 };
 window.renderMermaid();
+</script>
+
+<script>
+// --- ASCII Box-Drawing Diagram rendering ---
+
+// Parse ASCII grid into structured data: boxes, arrows, dimensions
+window._parseAsciiDiagram = function(source) {
+  var lines = source.split('\\n');
+  var height = lines.length;
+
+  // Determine display width of a character (CJK = 2 columns, others = 1)
+  function charDisplayWidth(ch) {
+    var code = ch.charCodeAt(0);
+    // CJK Unified Ideographs, CJK Compatibility, Fullwidth forms, etc.
+    if ((code >= 0x1100 && code <= 0x115F) ||  // Hangul Jamo
+        (code >= 0x2E80 && code <= 0x303E) ||  // CJK Radicals, Kangxi, CJK Symbols
+        (code >= 0x3040 && code <= 0x33BF) ||  // Hiragana, Katakana, CJK Compatibility
+        (code >= 0x3400 && code <= 0x4DBF) ||  // CJK Ext A
+        (code >= 0x4E00 && code <= 0xA4CF) ||  // CJK Unified, Yi
+        (code >= 0xAC00 && code <= 0xD7AF) ||  // Hangul Syllables
+        (code >= 0xF900 && code <= 0xFAFF) ||  // CJK Compatibility Ideographs
+        (code >= 0xFE30 && code <= 0xFE4F) ||  // CJK Compatibility Forms
+        (code >= 0xFF01 && code <= 0xFF60) ||  // Fullwidth Forms
+        (code >= 0xFFE0 && code <= 0xFFE6) ||  // Fullwidth Signs
+        (code >= 0x20000 && code <= 0x2FA1F))  // CJK Ext B-F, Compatibility Supplements
+    { return 2; }
+    return 1;
+  }
+
+  // Build 2D grid in DISPLAY columns (CJK chars occupy 2 cells)
+  var width = 0;
+  var grid = [];
+  for (var y = 0; y < height; y++) {
+    grid[y] = [];
+    var col = 0;
+    for (var ci = 0; ci < lines[y].length; ci++) {
+      var ch = lines[y][ci];
+      var dw = charDisplayWidth(ch);
+      grid[y][col] = ch;
+      if (dw === 2) {
+        grid[y][col + 1] = ' '; // pad the second display column
+      }
+      col += dw;
+    }
+    // Fill remaining with spaces
+    if (col > width) width = col;
+  }
+  // Ensure all rows have same width
+  for (var y2 = 0; y2 < height; y2++) {
+    while (grid[y2].length < width) grid[y2].push(' ');
+  }
+
+  function charAt(x, y) {
+    if (y < 0 || y >= height || x < 0 || x >= width) return ' ';
+    return grid[y][x] || ' ';
+  }
+
+  // Box-drawing character sets
+  var topLeft = new Set(['┌', '╔']);
+  var topRight = new Set(['┐', '╗']);
+  var bottomLeft = new Set(['└', '╚']);
+  var bottomRight = new Set(['┘', '╝']);
+  var horizontal = new Set(['─', '═', '┬', '┴', '┼']);
+  var vertical = new Set(['│', '║', '├', '┤', '┼']);
+  var topEdge = new Set(['─', '═', '┬', '┴', '┼', '┐', '╗']);
+  var leftEdge = new Set(['│', '║', '├', '┤', '┼', '└', '╚']);
+  var separatorLeft = new Set(['├', '╠']);
+  var separatorRight = new Set(['┤', '╣']);
+  var separatorH = new Set(['─', '═', '┼', '┬', '┴']);
+
+  var boxes = [];
+  var used = {}; // track top-left corners already used
+
+  // Trace boxes from every top-left corner
+  for (var sy = 0; sy < height; sy++) {
+    for (var sx = 0; sx < width; sx++) {
+      if (!topLeft.has(charAt(sx, sy))) continue;
+      var key = sx + ',' + sy;
+      if (used[key]) continue;
+
+      // Step 1: Scan DOWN from row sy to find └ (bottom-left corner)
+      // Use ±1 display-column tolerance for hand-drawn alignment
+      var ey = -1;
+      for (var ty = sy + 1; ty < height; ty++) {
+        // Check for └ at sx or sx±1
+        if (bottomLeft.has(charAt(sx, ty)) || bottomLeft.has(charAt(sx + 1, ty)) || bottomLeft.has(charAt(sx - 1, ty))) {
+          ey = ty; break;
+        }
+        // Allow │ ├ at sx or sx±1
+        var hasVert = false;
+        for (var dx = -1; dx <= 1; dx++) {
+          var lc = charAt(sx + dx, ty);
+          if (vertical.has(lc) || separatorLeft.has(lc)) { hasVert = true; break; }
+        }
+        if (!hasVert) break;
+      }
+      if (ey < 0) continue;
+
+      // Step 2: Scan RIGHT on row sy to find ┐ (top-right corner)
+      var exTop = -1;
+      for (var tx = sx + 1; tx < width; tx++) {
+        if (topRight.has(charAt(tx, sy))) { exTop = tx; break; }
+      }
+      if (exTop < 0) continue;
+
+      // Step 3: Scan RIGHT on row ey to find ┘ (bottom-right corner)
+      var exBot = -1;
+      for (var bx = sx + 1; bx < width; bx++) {
+        if (bottomRight.has(charAt(bx, ey))) { exBot = bx; break; }
+      }
+      if (exBot < 0) continue;
+
+      // Use the wider of top/bottom as the box right edge
+      var ex = Math.max(exTop, exBot);
+
+      // Require at least one horizontal bar on the top edge
+      var hasTopBar = false;
+      for (var tx2 = sx + 1; tx2 < exTop; tx2++) {
+        if (horizontal.has(charAt(tx2, sy))) { hasTopBar = true; break; }
+      }
+      if (!hasTopBar) continue;
+
+      used[key] = true;
+
+      // Find separator lines inside the box
+      var separators = [];
+      for (var sepY = sy + 1; sepY < ey; sepY++) {
+        if (!separatorLeft.has(charAt(sx, sepY))) continue;
+        // Find ┤ on this row near the right edge (tolerance for CJK alignment)
+        var foundRight = false;
+        for (var rx = ex + 2; rx >= ex - 2 && rx > sx; rx--) {
+          if (separatorRight.has(charAt(rx, sepY))) { foundRight = true; break; }
+        }
+        if (!foundRight) continue;
+        // Count horizontal bars - need a majority
+        var hCount = 0;
+        for (var sepX = sx + 1; sepX < ex; sepX++) {
+          if (separatorH.has(charAt(sepX, sepY))) hCount++;
+        }
+        if (hCount > (ex - sx - 1) * 0.4) separators.push(sepY);
+      }
+
+      // Extract border title from top edge (e.g. ┌── Title ───┐)
+      var borderTitle = '';
+      var topLine = '';
+      for (var btx = sx + 1; btx < exTop; btx++) {
+        topLine += charAt(btx, sy);
+      }
+      // Strip box-drawing chars, extract text
+      var btClean = topLine.replace(/[\\u2500-\\u257F\\u2580-\\u259F─═┬┴┼]/g, ' ').replace(/^\\s+|\\s+$/g, '');
+      if (btClean) borderTitle = btClean;
+
+      // Extract text lines with row positions: { text, row }
+      var textEntries = [];
+      var sectionStarts = [sy + 1].concat(separators.map(function(s) { return s + 1; }));
+      var sectionEnds = separators.concat([ey]);
+
+      for (var si = 0; si < sectionStarts.length; si++) {
+        for (var ty = sectionStarts[si]; ty < sectionEnds[si]; ty++) {
+          var lineText = '';
+          for (var tx = sx + 1; tx < ex; tx++) {
+            lineText += charAt(tx, ty);
+          }
+          lineText = lineText.replace(/^\\s+|\\s+$/g, '');
+          if (lineText) textEntries.push({ text: lineText, row: ty });
+        }
+      }
+
+      boxes.push({
+        x: sx, y: sy, x2: ex, y2: ey,
+        w: ex - sx, h: ey - sy,
+        area: (ex - sx) * (ey - sy),
+        borderTitle: borderTitle,
+        textEntries: textEntries,
+        separators: separators,
+        children: [],
+        depth: 0,
+        parent: null
+      });
+    }
+  }
+
+  // Nesting: sort by area descending, assign parent-child
+  boxes.sort(function(a, b) { return b.area - a.area; });
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    for (var j = 0; j < i; j++) {
+      var p = boxes[j];
+      if (b.x > p.x && b.y > p.y && b.x2 < p.x2 && b.y2 < p.y2) {
+        if (!b.parent || b.parent.area > p.area) {
+          b.parent = p;
+        }
+      }
+    }
+    if (b.parent) {
+      b.parent.children.push(b);
+      b.depth = b.parent.depth + 1;
+    }
+  }
+
+  // --- Detect connectors and arrows ---
+  var arrows = [];       // simple arrows: { x1,y1, x2,y2, dir }
+  var connectors = [];   // branching connectors: { row, x1, x2, branches[], stemX, stemY1 }
+  var vertConn = new Set(['│', '║', '|', '┼', '┬', '┴']);
+  var horzConn = new Set(['─', '═', '-', '┼', '├', '┤', '┬', '┴']);
+  var junctionChars = new Set(['┼', '┬', '┴']);
+  var branchLeft = new Set(['┌', '╔']);
+  var branchRight = new Set(['┐', '╗']);
+  var usedArrowRows = {}; // rows consumed by connectors
+
+  // Step 1: Detect branching connector lines (┌───┼───┐ with ▼ below)
+  for (var cy = 0; cy < height; cy++) {
+    // Look for ┌ that is NOT a box top-left (no matching └ below)
+    for (var cx = 0; cx < width; cx++) {
+      if (!branchLeft.has(charAt(cx, cy))) continue;
+      // Is this ┌ already a known box corner? Skip it
+      var isBoxCorner = false;
+      for (var bci = 0; bci < boxes.length; bci++) {
+        if (boxes[bci].x === cx && boxes[bci].y === cy) { isBoxCorner = true; break; }
+      }
+      if (isBoxCorner) continue;
+
+      // Scan right to find ┐
+      var crx = -1;
+      for (var rx = cx + 1; rx < width; rx++) {
+        if (branchRight.has(charAt(rx, cy))) { crx = rx; break; }
+        if (!horzConn.has(charAt(rx, cy)) && charAt(rx, cy) !== ' ') break;
+      }
+      if (crx < 0) continue;
+
+      // Find all branch points (┼ ┬ ┌ ┐) on this line, plus the endpoints
+      var branches = [cx, crx]; // endpoints are also branch points
+      for (var bx = cx + 1; bx < crx; bx++) {
+        if (junctionChars.has(charAt(bx, cy))) branches.push(bx);
+      }
+      // Sort and deduplicate
+      branches.sort(function(a, b) { return a - b; });
+      var ubranches = [branches[0]];
+      for (var ub = 1; ub < branches.length; ub++) {
+        if (branches[ub] !== branches[ub - 1]) ubranches.push(branches[ub]);
+      }
+      branches = ubranches;
+
+      // Check: at least one branch point should have ▼ on the row below
+      var hasArrowBelow = false;
+      for (var bi2 = 0; bi2 < branches.length; bi2++) {
+        if (charAt(branches[bi2], cy + 1) === '▼') { hasArrowBelow = true; break; }
+      }
+      if (!hasArrowBelow) continue;
+
+      // Trace stem: find │ going upward from a ┼/┬ junction
+      var stemX = -1, stemY1 = cy;
+      for (var bi3 = 0; bi3 < branches.length; bi3++) {
+        var bxc = branches[bi3];
+        if (junctionChars.has(charAt(bxc, cy))) {
+          // Trace up from this junction
+          var sty = cy - 1;
+          while (sty >= 0 && vertConn.has(charAt(bxc, sty))) sty--;
+          if (sty < cy - 1) {
+            stemX = bxc;
+            stemY1 = sty + 1;
+            break;
+          }
+        }
+      }
+
+      connectors.push({
+        row: cy,
+        x1: cx,
+        x2: crx,
+        branches: branches,
+        stemX: stemX,
+        stemY1: stemY1
+      });
+      // Mark rows consumed by this connector
+      usedArrowRows[cy] = true;
+      usedArrowRows[cy + 1] = true;
+    }
+  }
+
+  // Step 2: Detect simple arrows (▼▲►◄) NOT consumed by connectors
+  for (var ay = 0; ay < height; ay++) {
+    for (var ax = 0; ax < width; ax++) {
+      var ac = charAt(ax, ay);
+      if (ac === '▼' && !usedArrowRows[ay]) {
+        var uy = ay - 1;
+        while (uy >= 0 && vertConn.has(charAt(ax, uy))) uy--;
+        if (uy + 1 <= ay) {
+          arrows.push({ x1: ax, y1: uy + 1, x2: ax, y2: ay, dir: 'down' });
+        }
+      } else if (ac === '▲') {
+        var dy2 = ay + 1;
+        while (dy2 < height && vertConn.has(charAt(ax, dy2))) dy2++;
+        var uy2 = ay - 1;
+        while (uy2 >= 0 && vertConn.has(charAt(ax, uy2))) uy2--;
+        if (dy2 - 1 >= ay) {
+          arrows.push({ x1: ax, y1: dy2 - 1, x2: ax, y2: ay, dir: 'up' });
+        }
+      } else if (ac === '►') {
+        var lx = ax - 1;
+        while (lx >= 0 && horzConn.has(charAt(lx, ay))) lx--;
+        arrows.push({ x1: lx + 1, y1: ay, x2: ax, y2: ay, dir: 'right' });
+      } else if (ac === '◄') {
+        var rx2 = ax + 1;
+        while (rx2 < width && horzConn.has(charAt(rx2, ay))) rx2++;
+        arrows.push({ x1: rx2 - 1, y1: ay, x2: ax, y2: ay, dir: 'left' });
+      }
+    }
+  }
+
+  // Deduplicate arrows
+  var uniqueArrows = [];
+  var arrowKeys = {};
+  for (var ai = 0; ai < arrows.length; ai++) {
+    var ak = arrows[ai].x1 + ',' + arrows[ai].y1 + ',' + arrows[ai].x2 + ',' + arrows[ai].y2;
+    if (!arrowKeys[ak]) {
+      arrowKeys[ak] = true;
+      uniqueArrows.push(arrows[ai]);
+    }
+  }
+  arrows = uniqueArrows;
+
+  // Collect free text lines (outside any box, not pure box-drawing/arrows)
+  var boxDrawingOnly = /^[\\u2500-\\u257F\\u2580-\\u259F┌┐└┘├┤┬┴┼─│═║╔╗╚╝╠╣╦╩╬▼▲►◄\\s]*$/;
+  var freeText = [];
+  for (var fy = 0; fy < height; fy++) {
+    // Check if this row falls inside any box
+    var inBox = false;
+    for (var fbi = 0; fbi < boxes.length; fbi++) {
+      var fb = boxes[fbi];
+      if (fy >= fb.y && fy <= fb.y2) { inBox = true; break; }
+    }
+    if (inBox) continue;
+    // Read the full row text
+    var rowText = '';
+    for (var fx = 0; fx < width; fx++) {
+      rowText += charAt(fx, fy);
+    }
+    rowText = rowText.replace(/^\\s+|\\s+$/g, '');
+    if (!rowText) continue;
+    // Skip lines that are purely box-drawing chars / arrows
+    if (boxDrawingOnly.test(rowText)) continue;
+    // Clean box-drawing chars, keep readable text
+    var cleanRow = rowText.replace(/[\\u2500-\\u257F\\u2580-\\u259F┌┐└┘├┤┬┴┼─│═║╔╗╚╝╠╣╦╩╬▼▲►◄]/g, ' ').replace(/\\s+/g, ' ').replace(/^\\s+|\\s+$/g, '');
+    if (cleanRow) freeText.push({ text: cleanRow, row: fy });
+  }
+
+  return { boxes: boxes, arrows: arrows, connectors: connectors, freeText: freeText, width: width, height: height };
+};
+
+// Render parsed ASCII diagram to SVG string
+window._renderAsciiDiagramSvg = function(parsed) {
+  var CELL_W = 8.5;
+  var CELL_H = 18;
+  var PAD = 10;
+  var svgW = parsed.width * CELL_W + PAD * 2;
+  var svgH = parsed.height * CELL_H + PAD * 2;
+
+  var isDark = window._isDarkTheme ? window._isDarkTheme() : false;
+
+  var lightColors = [
+    { fill: '#e8f4fd', stroke: '#3b82f6', text: '#1e293b' },
+    { fill: '#f0fdf4', stroke: '#22c55e', text: '#1e293b' },
+    { fill: '#fef3c7', stroke: '#f59e0b', text: '#1e293b' },
+    { fill: '#fce7f3', stroke: '#ec4899', text: '#1e293b' },
+    { fill: '#ede9fe', stroke: '#8b5cf6', text: '#1e293b' }
+  ];
+  var darkColors = [
+    { fill: '#1e3a5f', stroke: '#60a5fa', text: '#e2e8f0' },
+    { fill: '#1a3a2a', stroke: '#4ade80', text: '#e2e8f0' },
+    { fill: '#3d2e0a', stroke: '#fbbf24', text: '#e2e8f0' },
+    { fill: '#3d1a2e', stroke: '#f472b6', text: '#e2e8f0' },
+    { fill: '#2e1a5e', stroke: '#a78bfa', text: '#e2e8f0' }
+  ];
+  var colors = isDark ? darkColors : lightColors;
+  var arrowColor = isDark ? '#94a3b8' : '#64748b';
+  var sepColor = isDark ? 'rgba(148,163,184,0.3)' : 'rgba(100,116,139,0.3)';
+
+  // Helper to escape XML entities
+  function escXml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  var parts = [];
+  parts.push('<svg xmlns="http://www.w3.org/2000/svg" width="' + svgW + '" height="' + svgH + '" viewBox="0 0 ' + svgW + ' ' + svgH + '">');
+  parts.push('<defs><marker id="ad-arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">');
+  parts.push('<polygon points="0 0, 8 3, 0 6" fill="' + arrowColor + '"/>');
+  parts.push('</marker></defs>');
+
+  // Render boxes sorted by depth ascending (parents behind children)
+  var sortedBoxes = parsed.boxes.slice().sort(function(a, b) { return a.depth - b.depth; });
+
+  for (var i = 0; i < sortedBoxes.length; i++) {
+    var box = sortedBoxes[i];
+    var c = colors[box.depth % colors.length];
+    var rx = box.x * CELL_W + PAD;
+    var ry = box.y * CELL_H + PAD;
+    var rw = box.w * CELL_W;
+    var rh = box.h * CELL_H;
+
+    parts.push('<rect x="' + rx + '" y="' + ry + '" width="' + rw + '" height="' + rh + '" rx="6" ry="6" fill="' + c.fill + '" stroke="' + c.stroke + '" stroke-width="1.5" opacity="0.9"/>');
+
+    // Separator lines
+    for (var si2 = 0; si2 < box.separators.length; si2++) {
+      var sepY2 = box.separators[si2] * CELL_H + PAD + CELL_H / 2;
+      parts.push('<line x1="' + (rx + 4) + '" y1="' + sepY2 + '" x2="' + (rx + rw - 4) + '" y2="' + sepY2 + '" stroke="' + sepColor + '" stroke-width="1" stroke-dasharray="4,3"/>');
+    }
+
+    // Border title (text embedded in top edge like ┌── Title ──┐)
+    if (box.borderTitle) {
+      var titleY = box.y * CELL_H + PAD + CELL_H / 2;
+      var titleX = (box.x + box.x2) / 2 * CELL_W + PAD;
+      parts.push('<text x="' + titleX + '" y="' + titleY + '" text-anchor="middle" dominant-baseline="central" fill="' + c.stroke + '" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600">' + escXml(box.borderTitle) + '</text>');
+    }
+
+    // Interior text — skip lines that fall inside a child box (use actual row)
+    var filteredLines = [];
+    for (var te = 0; te < box.textEntries.length; te++) {
+      var entry = box.textEntries[te];
+      var insideChild = false;
+      for (var ci = 0; ci < box.children.length; ci++) {
+        var child = box.children[ci];
+        if (entry.row >= child.y && entry.row <= child.y2) {
+          insideChild = true; break;
+        }
+      }
+      if (insideChild) continue;
+      var cleanText = entry.text.replace(/[\\u2500-\\u257F\\u2580-\\u259F┌┐└┘├┤┬┴┼─│═║╔╗╚╝╠╣╦╩╬▼▲►◄]/g, ' ').replace(/\\s+/g, ' ').replace(/^\\s+|\\s+$/g, '');
+      if (cleanText) filteredLines.push({ text: cleanText, row: entry.row });
+    }
+
+    for (var fl = 0; fl < filteredLines.length; fl++) {
+      var textY = filteredLines[fl].row * CELL_H + PAD + CELL_H / 2;
+      var textX = (box.x + box.x2) / 2 * CELL_W + PAD;
+      parts.push('<text x="' + textX + '" y="' + textY + '" text-anchor="middle" dominant-baseline="central" fill="' + c.text + '" font-family="system-ui, -apple-system, sans-serif" font-size="12">' + escXml(filteredLines[fl].text) + '</text>');
+    }
+  }
+
+  // Render arrows — center free arrows (outside all boxes) horizontally
+  var centerX = parsed.width / 2 * CELL_W + PAD;
+  for (var a = 0; a < parsed.arrows.length; a++) {
+    var arrow = parsed.arrows[a];
+    // Check if arrow is outside all boxes
+    var arrowInBox = false;
+    for (var abi = 0; abi < parsed.boxes.length; abi++) {
+      var ab = parsed.boxes[abi];
+      if (arrow.y1 >= ab.y && arrow.y2 <= ab.y2 && arrow.x1 >= ab.x && arrow.x1 <= ab.x2) {
+        arrowInBox = true; break;
+      }
+    }
+    var arrowX = arrowInBox ? (arrow.x1 * CELL_W + PAD + CELL_W / 2) : centerX;
+    var ay1 = arrow.y1 * CELL_H + PAD + CELL_H / 2;
+    var ay2 = arrow.y2 * CELL_H + PAD + CELL_H / 2;
+    parts.push('<line x1="' + arrowX + '" y1="' + ay1 + '" x2="' + arrowX + '" y2="' + ay2 + '" stroke="' + arrowColor + '" stroke-width="1.5" marker-end="url(#ad-arrowhead)"/>');
+  }
+
+  // Render branching connectors
+  for (var ci2 = 0; ci2 < parsed.connectors.length; ci2++) {
+    var conn = parsed.connectors[ci2];
+    var connY = conn.row * CELL_H + PAD + CELL_H / 2;
+    var connLeft = conn.x1 * CELL_W + PAD + CELL_W / 2;
+    var connRight = conn.x2 * CELL_W + PAD + CELL_W / 2;
+
+    // Stem: vertical line from source down to the horizontal bar
+    if (conn.stemX >= 0 && conn.stemY1 < conn.row) {
+      var stemPx = conn.stemX * CELL_W + PAD + CELL_W / 2;
+      var stemTop = conn.stemY1 * CELL_H + PAD + CELL_H / 2;
+      parts.push('<line x1="' + stemPx + '" y1="' + stemTop + '" x2="' + stemPx + '" y2="' + connY + '" stroke="' + arrowColor + '" stroke-width="1.5"/>');
+    }
+
+    // Horizontal bar
+    parts.push('<line x1="' + connLeft + '" y1="' + connY + '" x2="' + connRight + '" y2="' + connY + '" stroke="' + arrowColor + '" stroke-width="1.5"/>');
+
+    // Branch stubs: vertical lines down from each branch point to ▼ arrowheads
+    for (var br = 0; br < conn.branches.length; br++) {
+      var brX = conn.branches[br] * CELL_W + PAD + CELL_W / 2;
+      var brY2 = (conn.row + 1) * CELL_H + PAD + CELL_H / 2;
+      parts.push('<line x1="' + brX + '" y1="' + connY + '" x2="' + brX + '" y2="' + brY2 + '" stroke="' + arrowColor + '" stroke-width="1.5" marker-end="url(#ad-arrowhead)"/>');
+    }
+  }
+
+  // Render free text (outside any box)
+  var freeColor = isDark ? '#e2e8f0' : '#1e293b';
+  for (var ft = 0; ft < parsed.freeText.length; ft++) {
+    var fEntry = parsed.freeText[ft];
+    var ftY = fEntry.row * CELL_H + PAD + CELL_H / 2;
+    // Find the horizontal extent of the text in the grid to position it
+    var ftX = parsed.width / 2 * CELL_W + PAD;
+    parts.push('<text x="' + ftX + '" y="' + ftY + '" text-anchor="middle" dominant-baseline="central" fill="' + freeColor + '" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-style="italic">' + escXml(fEntry.text) + '</text>');
+  }
+
+  parts.push('</svg>');
+  return parts.join('');
+};
+
+// Orchestration: render all ASCII diagrams
+window.renderAsciiDiagram = function() {
+  var els = document.querySelectorAll('.ascii-diagram:not([data-rendered])');
+  els.forEach(function(el) {
+    try {
+      var source = el.getAttribute('data-source');
+      if (!source) {
+        var script = el.querySelector('script[type="text/ascii-diagram"]');
+        source = script ? script.textContent : el.textContent;
+        if (source) el.setAttribute('data-source', source);
+      }
+      if (!source || !source.trim()) return;
+
+      if (window._asciiDiagramMode) {
+        // Show raw ASCII in a <pre>
+        el.textContent = '';
+        var pre = document.createElement('pre');
+        pre.className = 'ascii-diagram-source';
+        pre.textContent = source;
+        el.appendChild(pre);
+      } else {
+        // Parse and render SVG
+        var parsed = window._parseAsciiDiagram(source);
+        if (parsed.boxes.length === 0) {
+          el.textContent = '';
+          var pre2 = document.createElement('pre');
+          pre2.className = 'ascii-diagram-source';
+          pre2.textContent = source;
+          el.appendChild(pre2);
+        } else {
+          var svgStr = window._renderAsciiDiagramSvg(parsed);
+          // Use DOMParser for safe SVG insertion
+          var parser = new DOMParser();
+          var doc = parser.parseFromString(svgStr, 'image/svg+xml');
+          var svgEl = doc.documentElement;
+          el.textContent = '';
+          el.appendChild(document.importNode(svgEl, true));
+        }
+      }
+      el.setAttribute('data-rendered', 'true');
+    } catch(e) { console.warn('ASCII diagram render error:', e); }
+  });
+};
+window.renderAsciiDiagram();
 </script>
 
 <script>
@@ -3808,11 +4405,15 @@ window.renderAllDiagrams = function() {
   document.querySelectorAll('.recharts[data-rendered]').forEach(function(el) {
     el.removeAttribute('data-rendered');
   });
+  document.querySelectorAll('.ascii-diagram[data-rendered]').forEach(function(el) {
+    el.removeAttribute('data-rendered');
+  });
   if (window.renderMermaid) window.renderMermaid();
   window.renderWaveDrom();
   window.renderGraphViz();
   window.renderVega();
   window.renderRecharts();
+  if (window.renderAsciiDiagram) window.renderAsciiDiagram();
   if (window._applyDiagramDarkFilter) window._applyDiagramDarkFilter();
 };
 
@@ -3835,6 +4436,12 @@ window.rerenderDiagramsForTheme = function() {
   document.querySelectorAll('.wavedrom, .graphviz, .kroki-diagram').forEach(function(el) {
     el.classList.toggle('diagram-invert-dark', isDark);
   });
+
+  // ASCII diagrams: re-render with updated theme colors
+  document.querySelectorAll('.ascii-diagram[data-rendered]').forEach(function(el) {
+    el.removeAttribute('data-rendered');
+  });
+  if (window.renderAsciiDiagram) window.renderAsciiDiagram();
 };
 
 // Apply dark filter to diagrams without native dark support
@@ -3852,6 +4459,7 @@ window.addEventListener('load', function() {
   window.renderGraphViz();
   window.renderVega();
   window.renderRecharts();
+  if (window.renderAsciiDiagram) window.renderAsciiDiagram();
   window._applyDiagramDarkFilter();
 });
 // Also retry after a delay in case load event already fired or scripts are slow
@@ -3860,6 +4468,7 @@ setTimeout(function() {
   window.renderGraphViz();
   window.renderVega();
   window.renderRecharts();
+  if (window.renderAsciiDiagram) window.renderAsciiDiagram();
   window._applyDiagramDarkFilter();
 }, 1500);
 
@@ -4594,9 +5203,23 @@ body.vscode-high-contrast .ctx-sep {
 
       case 'toggle-mermaid-ascii':
         window._mermaidAsciiMode = !window._mermaidAsciiMode;
+        window._asciiDiagramMode = window._mermaidAsciiMode;
+        // Sync all ASCII buttons (both mermaid and box-drawing)
+        document.querySelectorAll('.diagram-ascii-btn').forEach(function(btn) {
+          btn.classList.toggle('active', window._mermaidAsciiMode);
+        });
+        document.querySelectorAll('.diagram-ascii-diagram-btn').forEach(function(btn) {
+          btn.classList.toggle('active', window._asciiDiagramMode);
+        });
+        // Re-render mermaid
         if (window.rerenderDiagramsForTheme) {
           window.rerenderDiagramsForTheme();
         }
+        // Re-render ASCII box-drawing diagrams
+        document.querySelectorAll('.ascii-diagram[data-rendered]').forEach(function(el) {
+          el.removeAttribute('data-rendered');
+        });
+        if (window.renderAsciiDiagram) window.renderAsciiDiagram();
         if (vscode) {
           vscode.postMessage({ command: 'setMermaidAsciiMode', args: [window._mermaidAsciiMode] });
         }

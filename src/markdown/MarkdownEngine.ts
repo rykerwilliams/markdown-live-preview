@@ -4004,10 +4004,13 @@ window._renderAsciiDiagramSvg = function(parsed) {
       for (var dp = 0; dp < rawT.length; dp++) {
         if (rawT[dp] === '│' || rawT[dp] === '║') {
           var gridCol = box.origX + 1 + dp;
+          // Skip │ near the current box's own edges (±2 tolerance for border/content alignment drift)
+          if (Math.abs(gridCol - box.x) <= 2 || Math.abs(gridCol - box.x2) <= 2 ||
+              Math.abs(gridCol - box.origX) <= 2 || Math.abs(gridCol - (box.origX2 || box.x2)) <= 2) continue;
           var isChildEdge = false;
           for (var dci = 0; dci < box.children.length; dci++) {
             var dc = box.children[dci];
-            if ((Math.abs(gridCol - dc.x) <= 1 || Math.abs(gridCol - dc.x2) <= 1) &&
+            if ((Math.abs(gridCol - dc.x) <= 2 || Math.abs(gridCol - dc.x2) <= 2) &&
                 entry.row >= dc.y && entry.row <= dc.y2) {
               isChildEdge = true; break;
             }

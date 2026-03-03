@@ -3982,8 +3982,11 @@ window._renderAsciiDiagramSvg = function(parsed) {
       parts.push('<text x="' + titleX + '" y="' + titleY + '" text-anchor="middle" dominant-baseline="central" fill="' + c.stroke + '" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600">' + escXml(box.borderTitle) + '</text>');
     }
 
-    // Interior text — skip lines that fall inside a child box (use actual row)
+    // Interior text — skip lines inside child boxes; split at internal │ column dividers
     var filteredLines = [];
+    var boxDrawCleanRe = /[\\u2500-\\u257F\\u2580-\\u259F┌┐└┘├┤┬┴┼─│═║╔╗╚╝╠╣╦╩╬▼▲►◄]/g;
+    var dividerCols = {}; // track divider column positions for vertical separator lines
+
     for (var te = 0; te < box.textEntries.length; te++) {
       var entry = box.textEntries[te];
       var insideChild = false;
@@ -3994,13 +3997,79 @@ window._renderAsciiDiagramSvg = function(parsed) {
         }
       }
       if (insideChild) continue;
-      var cleanText = entry.text.replace(/[\\u2500-\\u257F\\u2580-\\u259F┌┐└┘├┤┬┴┼─│═║╔╗╚╝╠╣╦╩╬▼▲►◄]/g, ' ').replace(/\\s+/g, ' ').replace(/^\\s+|\\s+$/g, '');
-      if (cleanText) filteredLines.push({ text: cleanText, row: entry.row });
+
+      // Find internal │ column divider positions (exclude child box borders)
+      var rawT = entry.text;
+      var divPos = [];
+      for (var dp = 0; dp < rawT.length; dp++) {
+        if (rawT[dp] === '│' || rawT[dp] === '║') {
+          var gridCol = box.origX + 1 + dp;
+          var isChildEdge = false;
+          for (var dci = 0; dci < box.children.length; dci++) {
+            var dc = box.children[dci];
+            if ((Math.abs(gridCol - dc.x) <= 1 || Math.abs(gridCol - dc.x2) <= 1) &&
+                entry.row >= dc.y && entry.row <= dc.y2) {
+              isChildEdge = true; break;
+            }
+          }
+          if (!isChildEdge) divPos.push(dp);
+        }
+      }
+
+      if (divPos.length > 0) {
+        // Track divider columns for vertical line rendering
+        for (var dpi = 0; dpi < divPos.length; dpi++) {
+          var gCol = box.origX + 1 + divPos[dpi];
+          if (!dividerCols[gCol]) dividerCols[gCol] = { yMin: entry.row, yMax: entry.row };
+          if (entry.row < dividerCols[gCol].yMin) dividerCols[gCol].yMin = entry.row;
+          if (entry.row > dividerCols[gCol].yMax) dividerCols[gCol].yMax = entry.row;
+        }
+        // Split text into segments at divider positions
+        var segStarts = [0].concat(divPos.map(function(p) { return p + 1; }));
+        var segEnds = divPos.concat([rawT.length]);
+        for (var seg = 0; seg < segStarts.length; seg++) {
+          var segText = rawT.substring(segStarts[seg], segEnds[seg])
+            .replace(boxDrawCleanRe, ' ').replace(/\\s+/g, ' ').replace(/^\\s+|\\s+$/g, '');
+          if (segText) {
+            filteredLines.push({
+              text: segText, row: entry.row,
+              colStart: box.origX + 1 + segStarts[seg],
+              colEnd: box.origX + 1 + segEnds[seg]
+            });
+          }
+        }
+      } else {
+        var cleanText = rawT.replace(boxDrawCleanRe, ' ').replace(/\\s+/g, ' ').replace(/^\\s+|\\s+$/g, '');
+        if (cleanText) filteredLines.push({ text: cleanText, row: entry.row });
+      }
     }
 
+    // Draw vertical column divider lines within their section bounds
+    var secStarts = [box.y + 1].concat(box.separators.map(function(s) { return s + 1; }));
+    var secEnds = box.separators.concat([box.y2]);
+    for (var dvKey in dividerCols) {
+      if (!dividerCols.hasOwnProperty(dvKey)) continue;
+      var dvInfo = dividerCols[dvKey];
+      var dvPx = parseInt(dvKey) * CELL_W + PAD + CELL_W / 2;
+      for (var dsi = 0; dsi < secStarts.length; dsi++) {
+        if (dvInfo.yMin >= secStarts[dsi] && dvInfo.yMax < secEnds[dsi]) {
+          var dvY1 = secStarts[dsi] * CELL_H + PAD;
+          var dvY2 = secEnds[dsi] * CELL_H + PAD + CELL_H;
+          parts.push('<line x1="' + dvPx + '" y1="' + dvY1 + '" x2="' + dvPx + '" y2="' + dvY2 + '" stroke="' + sepColor + '" stroke-width="1" stroke-dasharray="4,3"/>');
+          break;
+        }
+      }
+    }
+
+    // Render text segments (column-aware centering for split segments)
     for (var fl = 0; fl < filteredLines.length; fl++) {
       var textY = filteredLines[fl].row * CELL_H + PAD + CELL_H / 2;
-      var textX = (box.x + box.x2) / 2 * CELL_W + PAD;
+      var textX;
+      if (filteredLines[fl].colStart !== undefined) {
+        textX = (filteredLines[fl].colStart + filteredLines[fl].colEnd) / 2 * CELL_W + PAD;
+      } else {
+        textX = (box.x + box.x2) / 2 * CELL_W + PAD;
+      }
       parts.push('<text x="' + textX + '" y="' + textY + '" text-anchor="middle" dominant-baseline="central" fill="' + c.text + '" font-family="system-ui, -apple-system, sans-serif" font-size="12">' + escXml(filteredLines[fl].text) + '</text>');
     }
   }
@@ -4048,21 +4117,52 @@ window._renderAsciiDiagramSvg = function(parsed) {
 
       parts.push('<line x1="' + hax1 + '" y1="' + hay + '" x2="' + hax2 + '" y2="' + hay + '" stroke="' + arrowColor + '" stroke-width="1.5" marker-end="url(#ad-arrowhead)"/>');
     } else {
-      // Vertical arrow — snap to nearest connected box center
-      var snapBox = null;
-      var snapDist = Infinity;
-      for (var abi = 0; abi < parsed.boxes.length; abi++) {
-        var ab = parsed.boxes[abi];
-        var dTop = Math.min(Math.abs(arrow.y1 - ab.y), Math.abs(arrow.y2 - ab.y));
-        var dBot = Math.min(Math.abs(arrow.y1 - ab.y2), Math.abs(arrow.y2 - ab.y2));
-        var yDist = Math.min(dTop, dBot);
-        if (yDist <= 2 && arrow.x1 >= ab.x - 2 && arrow.x1 <= ab.x2 + 2) {
-          if (yDist < snapDist) { snapDist = yDist; snapBox = ab; }
-        }
-      }
-      var vax = snapBox ? ((snapBox.x + snapBox.x2) / 2 * CELL_W + PAD) : (arrow.x1 * CELL_W + PAD + CELL_W / 2);
+      // Vertical arrow — snap to nearest box center and clip at source/target box edges
+      var vax = arrow.x1 * CELL_W + PAD + CELL_W / 2;
       var vay1 = arrow.y1 * CELL_H + PAD + CELL_H / 2;
       var vay2 = arrow.y2 * CELL_H + PAD + CELL_H / 2;
+
+      // Find source box (smallest box with bottom edge near arrow start)
+      // and target box (smallest box with top edge near arrow end)
+      // Use edge proximity only — NOT containment — to avoid matching the outer container
+      var srcBox = null, tgtBox = null;
+      for (var abi = 0; abi < parsed.boxes.length; abi++) {
+        var ab = parsed.boxes[abi];
+        if (arrow.x1 < ab.x - 2 || arrow.x1 > ab.x2 + 2) continue;
+
+        if (arrow.dir === 'down') {
+          if (Math.abs(ab.y2 - arrow.y1) <= 2 && (!srcBox || ab.area < srcBox.area)) srcBox = ab;
+          if (Math.abs(ab.y - arrow.y2) <= 2 && (!tgtBox || ab.area < tgtBox.area)) tgtBox = ab;
+        } else if (arrow.dir === 'up') {
+          if (Math.abs(ab.y - arrow.y1) <= 2 && (!srcBox || ab.area < srcBox.area)) srcBox = ab;
+          if (Math.abs(ab.y2 - arrow.y2) <= 2 && (!tgtBox || ab.area < tgtBox.area)) tgtBox = ab;
+        }
+      }
+
+      // Snap X to source or target box center
+      var snapBox = srcBox || tgtBox;
+      if (snapBox) vax = (snapBox.x + snapBox.x2) / 2 * CELL_W + PAD;
+
+      // Clip Y endpoints to box edges so arrows don't penetrate boxes
+      if (srcBox) {
+        if (arrow.dir === 'down') {
+          var srcBotPx = srcBox.y * CELL_H + PAD + (srcBox.h + 1) * CELL_H;
+          if (vay1 < srcBotPx) vay1 = srcBotPx;
+        } else {
+          var srcTopPx = srcBox.y * CELL_H + PAD;
+          if (vay1 > srcTopPx) vay1 = srcTopPx;
+        }
+      }
+      if (tgtBox) {
+        if (arrow.dir === 'down') {
+          var tgtTopPx = tgtBox.y * CELL_H + PAD;
+          if (vay2 > tgtTopPx) vay2 = tgtTopPx;
+        } else {
+          var tgtBotPx = tgtBox.y * CELL_H + PAD + (tgtBox.h + 1) * CELL_H;
+          if (vay2 < tgtBotPx) vay2 = tgtBotPx;
+        }
+      }
+
       parts.push('<line x1="' + vax + '" y1="' + vay1 + '" x2="' + vax + '" y2="' + vay2 + '" stroke="' + arrowColor + '" stroke-width="1.5" marker-end="url(#ad-arrowhead)"/>');
     }
   }
@@ -4074,18 +4174,24 @@ window._renderAsciiDiagramSvg = function(parsed) {
     var connLeft = conn.x1 * CELL_W + PAD + CELL_W / 2;
     var connRight = conn.x2 * CELL_W + PAD + CELL_W / 2;
 
-    // Stem: vertical line from source down to the horizontal bar
+    // Stem: vertical line from source box bottom down to the horizontal bar
     if (conn.stemX >= 0 && conn.stemY1 < conn.row) {
-      // Snap stem to nearest box center above for cleaner alignment
+      // Find the closest box above the connector (largest y2 that's still < conn.row)
+      // to snap X to its center and clip stem start to its bottom edge
       var stemPx = conn.stemX * CELL_W + PAD + CELL_W / 2;
+      var stemTop = conn.stemY1 * CELL_H + PAD + CELL_H / 2;
+      var closestAbove = null;
       for (var sbi = 0; sbi < parsed.boxes.length; sbi++) {
         var sb = parsed.boxes[sbi];
         if (sb.y2 < conn.row && conn.stemX >= sb.x - 2 && conn.stemX <= sb.x2 + 2) {
-          stemPx = (sb.x + sb.x2) / 2 * CELL_W + PAD;
-          break;
+          if (!closestAbove || sb.y2 > closestAbove.y2) closestAbove = sb;
         }
       }
-      var stemTop = conn.stemY1 * CELL_H + PAD + CELL_H / 2;
+      if (closestAbove) {
+        stemPx = (closestAbove.x + closestAbove.x2) / 2 * CELL_W + PAD;
+        var boxBottomPx = closestAbove.y * CELL_H + PAD + (closestAbove.h + 1) * CELL_H;
+        if (stemTop < boxBottomPx) stemTop = boxBottomPx;
+      }
       parts.push('<line x1="' + stemPx + '" y1="' + stemTop + '" x2="' + stemPx + '" y2="' + connY + '" stroke="' + arrowColor + '" stroke-width="1.5"/>');
     }
 

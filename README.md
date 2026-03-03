@@ -87,6 +87,36 @@ Render interactive charts using [Recharts](https://recharts.org) v3 with JSX-lik
 
 Supported chart types: `LineChart`, `BarChart`, `AreaChart`, `PieChart`, `ComposedChart`, `ScatterChart`, `RadarChart`. Common components like `XAxis`, `YAxis`, `CartesianGrid`, `Tooltip`, `Legend` are all supported.
 
+#### ASCII Box-Drawing Diagrams — Auto-detected
+
+Plain code blocks containing Unicode box-drawing characters (┌─┐│└┘├┤┬┴┼) are automatically detected and rendered as colorful SVG graphics — no language tag needed:
+
+````markdown
+```
+┌─────────────────────┐
+│   API Gateway       │
+├─────────────────────┤
+│ Rate Limiting       │
+│ Authentication      │
+└─────────────────────┘
+        │
+        ▼
+┌─────────────────────┐
+│   Service Layer     │
+└─────────────────────┘
+```
+````
+
+Features:
+- **Auto-detection** — no `language` tag required; heuristics detect box-drawing density and corner characters
+- **Nested boxes** — inner boxes rendered with depth-based coloring
+- **Separators** — `├───┤` lines rendered as dashed dividers within boxes
+- **Border titles** — text embedded in top edges like `┌── Title ──┐`
+- **Arrows & branching** — `▼▲►◄` arrows with `┌───┼───┐` fan-out connectors
+- **Free text** — content outside boxes but inside the code fence is preserved
+- **CJK-aware** — correct alignment for Chinese/Japanese/Korean characters
+- **Theme-adaptive** — colors adjust to light/dark theme automatically
+
 #### Also Built-in
 
 - **WaveDrom** — digital timing diagrams
@@ -255,14 +285,14 @@ Hover over code blocks or diagrams to reveal quick action buttons:
 #### Code Blocks
 - **Copy** — Copy code to clipboard (line numbers excluded)
 
-#### Diagrams (Mermaid, GraphViz, Vega, WaveDrom)
+#### Diagrams (Mermaid, GraphViz, Vega, WaveDrom, ASCII Box-Drawing)
 - **Code** — Copy diagram source code
 - **SVG** — Copy as SVG to clipboard
 - **PNG** — Copy as PNG image to clipboard
 
-#### Mermaid Diagrams (Additional)
+#### Mermaid & ASCII Diagrams (Additional)
 - **Theme Selector** — Switch between 15 Mermaid themes on the fly
-- **ASCII Toggle** — Switch between SVG and ASCII rendering mode
+- **ASCII Toggle** — Unified toggle: switch all diagrams (Mermaid + box-drawing) between SVG and ASCII rendering mode. Also available via the right-click context menu.
 
 ### Copy for Lark (飞书)
 

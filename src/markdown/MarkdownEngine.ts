@@ -3972,7 +3972,7 @@ window._renderAsciiDiagramSvg = function(parsed) {
     // Separator lines
     for (var si2 = 0; si2 < box.separators.length; si2++) {
       var sepY2 = box.separators[si2] * CELL_H + PAD + CELL_H / 2;
-      parts.push('<line x1="' + (rx + 4) + '" y1="' + sepY2 + '" x2="' + (rx + rw - 4) + '" y2="' + sepY2 + '" stroke="' + sepColor + '" stroke-width="1" stroke-dasharray="4,3"/>');
+      parts.push('<line x1="' + (rx + 4) + '" y1="' + sepY2 + '" x2="' + (rx + rw - 4) + '" y2="' + sepY2 + '" stroke="' + sepColor + '" stroke-width="1"/>');
     }
 
     // Border title (text embedded in top edge like ┌── Title ──┐)
@@ -4020,12 +4020,19 @@ window._renderAsciiDiagramSvg = function(parsed) {
       }
 
       if (divPos.length > 0) {
-        // Track divider columns for vertical line rendering
+        // Track divider columns for vertical line rendering (keyed per section to avoid cross-section merging)
+        // Find which section this row belongs to
+        var secStarts = [box.y + 1].concat(box.separators.map(function(s) { return s + 1; }));
+        var secIdx = 0;
+        for (var si3 = 0; si3 < secStarts.length; si3++) {
+          if (entry.row >= secStarts[si3]) secIdx = si3;
+        }
         for (var dpi = 0; dpi < divPos.length; dpi++) {
           var gCol = box.origX + 1 + divPos[dpi];
-          if (!dividerCols[gCol]) dividerCols[gCol] = { yMin: entry.row, yMax: entry.row };
-          if (entry.row < dividerCols[gCol].yMin) dividerCols[gCol].yMin = entry.row;
-          if (entry.row > dividerCols[gCol].yMax) dividerCols[gCol].yMax = entry.row;
+          var dvKey2 = gCol + '_' + secIdx;
+          if (!dividerCols[dvKey2]) dividerCols[dvKey2] = { x: gCol, yMin: entry.row, yMax: entry.row };
+          if (entry.row < dividerCols[dvKey2].yMin) dividerCols[dvKey2].yMin = entry.row;
+          if (entry.row > dividerCols[dvKey2].yMax) dividerCols[dvKey2].yMax = entry.row;
         }
         // Split text into segments at divider positions
         var segStarts = [0].concat(divPos.map(function(p) { return p + 1; }));
@@ -4047,21 +4054,14 @@ window._renderAsciiDiagramSvg = function(parsed) {
       }
     }
 
-    // Draw vertical column divider lines within their section bounds
-    var secStarts = [box.y + 1].concat(box.separators.map(function(s) { return s + 1; }));
-    var secEnds = box.separators.concat([box.y2]);
+    // Draw vertical column divider lines spanning only the rows where │ actually appears
     for (var dvKey in dividerCols) {
       if (!dividerCols.hasOwnProperty(dvKey)) continue;
       var dvInfo = dividerCols[dvKey];
-      var dvPx = parseInt(dvKey) * CELL_W + PAD + CELL_W / 2;
-      for (var dsi = 0; dsi < secStarts.length; dsi++) {
-        if (dvInfo.yMin >= secStarts[dsi] && dvInfo.yMax < secEnds[dsi]) {
-          var dvY1 = secStarts[dsi] * CELL_H + PAD;
-          var dvY2 = secEnds[dsi] * CELL_H + PAD + CELL_H;
-          parts.push('<line x1="' + dvPx + '" y1="' + dvY1 + '" x2="' + dvPx + '" y2="' + dvY2 + '" stroke="' + sepColor + '" stroke-width="1" stroke-dasharray="4,3"/>');
-          break;
-        }
-      }
+      var dvPx = dvInfo.x * CELL_W + PAD + CELL_W / 2;
+      var dvY1 = dvInfo.yMin * CELL_H + PAD;
+      var dvY2 = (dvInfo.yMax + 1) * CELL_H + PAD;
+      parts.push('<line x1="' + dvPx + '" y1="' + dvY1 + '" x2="' + dvPx + '" y2="' + dvY2 + '" stroke="' + sepColor + '" stroke-width="1" stroke-dasharray="4,3"/>');
     }
 
     // Render text segments (column-aware centering for split segments)

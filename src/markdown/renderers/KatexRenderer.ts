@@ -98,7 +98,13 @@ export class KatexRenderer {
       return content;
     }
 
-    let result = content;
+    // Protect <pre>...</pre> blocks from math processing
+    const preBlocks: string[] = [];
+    let result = content.replace(/<pre[\s>][\s\S]*?<\/pre>/gi, (match) => {
+      const index = preBlocks.length;
+      preBlocks.push(match);
+      return `\x00PRE_BLOCK_${index}\x00`;
+    });
 
     // Process block math first (to avoid conflicts with inline)
     for (const [start, end] of config.math.blockDelimiters) {
@@ -109,6 +115,11 @@ export class KatexRenderer {
     for (const [start, end] of config.math.inlineDelimiters) {
       result = this.processMathDelimiters(result, start, end, false);
     }
+
+    // Restore <pre> blocks
+    result = result.replace(/\x00PRE_BLOCK_(\d+)\x00/g, (_, index) => {
+      return preBlocks[parseInt(index, 10)];
+    });
 
     return result;
   }
